@@ -1,3 +1,4 @@
-body[data-pages] :is(#settings-open,#scan,#stop,#runs-open,#tinder-open,#all-states,.metrics,.review-picker,.progress,#portal-alert){display:none!important}
+body[data-pages] :is(#settings-open,#scan,#stop,#runs-open,#tinder-open,.progress,#portal-alert){display:none!important}
+body[data-pages]:not([data-sync="connected"]) :is(#all-states,.metrics,.review-picker,.followup-open){display:none!important}
 body[data-pages] .detail-section:has(#detail-review),body[data-pages] .detail-section:has(#confirm-form),body[data-pages] label:has(#include_inactive){display:none!important}
 body[data-pages] .search-note{min-width:250px}

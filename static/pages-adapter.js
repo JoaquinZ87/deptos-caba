@@ -1,4 +1,4 @@
-/* Adaptador de consulta para la exportación de GitHub Pages. No hace escrituras. */
+/* Catálogo público y seguimiento privado sincronizado, con acceso independiente. */
 (() => {
   const catalogURL=new URL('../catalog.json',document.currentScript.src);
   let snapshot;
@@ -9,6 +9,56 @@
     }).catch(error=>{snapshot=null;throw error});
     return snapshot;
   }
+  const accessKey='deptos-pages-access-v1';
+  let access='',syncState='readonly';
+  const privateCache=new Map();
+  try{access=localStorage.getItem(accessKey)||''}catch{}
+  const hash=new URLSearchParams(location.hash.slice(1)),activation=hash.get('access');
+  if(activation){access=activation;hash.delete('access');history.replaceState(null,'',location.pathname+location.search+(hash.size?'#'+hash.toString():''))}
+  document.querySelector('.header-actions').insertAdjacentHTML('beforeend','<button id="pages-connect" class="subtle">Activar seguimiento</button>');
+  document.body.insertAdjacentHTML('beforeend',`<dialog id="pages-access-dialog" aria-labelledby="pages-access-title"><h2 id="pages-access-title">Tu seguimiento privado</h2><p>Activá este dispositivo con tu enlace privado. Tus notas se sincronizan con los demás dispositivos y no se publican en GitHub.</p><form id="pages-access-form"><label>Enlace privado o código de acceso<input id="pages-access-code" type="password" autocomplete="off" required></label><p id="pages-access-message" role="status"></p><button class="primary full" type="submit">Activar en este dispositivo</button></form><button id="pages-disconnect" class="subtle full" type="button">Desactivar en este dispositivo</button><button id="pages-access-close" class="text-button" type="button">Cerrar</button></dialog>`);
+  function showState(state){
+    syncState=state;document.body.dataset.sync=access?'connected':'readonly';
+    document.getElementById('pages-connect').textContent=access?'Mi seguimiento':'Activar seguimiento';
+    const label={readonly:'Catálogo de consulta',online:'Seguimiento sincronizado',offline:'Sin conexión para sincronizar. Podés conservar borradores.'}[state];
+    document.getElementById('scan-state').textContent=label;
+  }
+  async function remote(path,options={}){
+    const catalog=await data();
+    if(!catalog.sync_url)throw Error('El seguimiento todavía no está configurado.');
+    let response;
+    try{response=await fetch(new URL(path,catalog.sync_url),{...options,cache:'no-store',credentials:'omit',signal:AbortSignal.timeout(20000),headers:{Authorization:'Bearer '+access,'Content-Type':'application/json','ngrok-skip-browser-warning':'1'}})}
+    catch{showState('offline');throw Error('No se pudo conectar para guardar o consultar el seguimiento. Comprobá que la PC esté encendida y conectada.')}
+    let result;try{result=await response.json()}catch{showState('offline');throw Error('La conexión de seguimiento no está disponible en este momento.')}
+    if(!response.ok){
+      if(response.status===401){access='';privateCache.clear();try{localStorage.removeItem(accessKey)}catch{}showState('readonly')}
+      const error=new Error(typeof result.detail==='string'?result.detail:'No se pudo guardar. Revisá los datos ingresados.');error.status=response.status;throw error;
+    }
+    showState('online');
+    if(!options.method||options.method==='GET')privateCache.set(path,result);
+    else privateCache.set(path,result);
+    return result;
+  }
+  const ready=(async()=>{
+    if(!access){showState('readonly');return}
+    try{
+      await remote('/api/listings?status=candidates&page_size=1');
+      try{localStorage.setItem(accessKey,access)}catch{}
+    }catch(error){document.getElementById('pages-access-message').textContent=error.message;if(access){try{localStorage.setItem(accessKey,access)}catch{}}}
+  })();
+  window.deptosSyncEnabled=()=>Boolean(access);
+  document.getElementById('pages-connect').onclick=()=>document.getElementById('pages-access-dialog').showModal();
+  document.getElementById('pages-access-close').onclick=()=>document.getElementById('pages-access-dialog').close();
+  document.getElementById('pages-disconnect').onclick=()=>{access='';privateCache.clear();try{localStorage.removeItem(accessKey)}catch{}showState('readonly');document.getElementById('pages-access-dialog').close();if(typeof load==='function')load()};
+  document.getElementById('pages-access-form').onsubmit=async event=>{
+    event.preventDefault();let value=document.getElementById('pages-access-code').value.trim();
+    try{if(value.includes('://'))value=new URLSearchParams(new URL(value).hash.slice(1)).get('access')||''}catch{value=''}
+    if(!/^[A-Za-z0-9_-]{32,128}$/.test(value)){document.getElementById('pages-access-message').textContent='Pegá el enlace privado completo o el código de acceso.';return}
+    access=value;
+    try{await remote('/api/listings?status=candidates&page_size=1');localStorage.setItem(accessKey,access);document.getElementById('pages-access-code').value='';document.getElementById('pages-access-dialog').close();load()}
+    catch(error){document.getElementById('pages-access-message').textContent=error.message}
+  };
+  setInterval(()=>{if(access&&!document.hidden&&!document.querySelector('dialog[open]')&&typeof load==='function')load()},30000);
   const normal=value=>String(value??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
   function selected(catalog,p){
     const eligibility=p.get('status')||'candidates',q=normal(p.get('q'));
@@ -32,8 +82,17 @@
   // Valores vacíos para los controles privados ocultos; nunca se exportan notas ni seguimiento.
   function view(item){return {...item,active:true,notes:'',review_state:'unreviewed',overrides:{},dismissed:false,favorite:false}}
   window.deptosStaticApi=async(path,options={})=>{
-    if(options.method&&options.method!=='GET')throw Error('Este catálogo es de consulta. Los cambios se guardan en la web local.');
+    await ready;
     const url=new URL(path,'https://catalog.invalid'),catalog=await data();
+    if(access&&url.pathname.startsWith('/api/listings')){
+      try{return await remote(path,options)}catch(error){
+        if(!options.method||options.method==='GET'){
+          if(syncState==='offline'&&privateCache.has(path))return privateCache.get(path);
+          if(url.pathname==='/api/listings'&&syncState==='offline'){}else throw error;
+        }else throw error;
+      }
+    }
+    if(options.method&&options.method!=='GET')throw Error('Activá tu seguimiento privado para guardar cambios.');
     if(url.pathname==='/api/settings')return {settings:{...catalog.settings,automatic:false},available_neighborhoods:catalog.available_neighborhoods};
     if(url.pathname==='/api/listings'){
       const items=selected(catalog,url.searchParams),page=Math.max(1,Number(url.searchParams.get('page'))||1),size=24;
@@ -47,7 +106,7 @@
   };
   window.deptosStaticStatus=async()=>{
     const catalog=await data();
-    document.getElementById('scan-state').textContent='Catálogo de consulta';
+    await ready;showState(syncState);
     document.getElementById('next-run').textContent='Actualizado: '+new Date(catalog.generated_at).toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'});
   };
   window.deptosStaticExport=async params=>{
