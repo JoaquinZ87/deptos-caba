@@ -1,4 +1,4 @@
-/* Catálogo público y seguimiento privado sincronizado, con acceso independiente. */
+/* Catálogo y seguimiento sincronizado; admite acceso directo o privado. */
 (() => {
   const catalogURL=new URL('../catalog.json',document.currentScript.src);
   let snapshot;
@@ -10,15 +10,17 @@
     return snapshot;
   }
   const accessKey='deptos-pages-access-v1';
-  let access='',syncState='readonly';
+  let access='',publicEdit=false,syncState='readonly';
+  const syncEnabled=()=>publicEdit||Boolean(access);
   const privateCache=new Map();
   try{access=localStorage.getItem(accessKey)||''}catch{}
   const hash=new URLSearchParams(location.hash.slice(1)),activation=hash.get('access');
   if(activation){access=activation;hash.delete('access');history.replaceState(null,'',location.pathname+location.search+(hash.size?'#'+hash.toString():''))}
-  document.querySelector('.header-actions').insertAdjacentHTML('beforeend','<button id="pages-connect" class="subtle">Activar seguimiento</button>');
+  document.querySelector('.header-actions').insertAdjacentHTML('beforeend','<button id="pages-connect" class="subtle" hidden>Activar seguimiento</button>');
   document.body.insertAdjacentHTML('beforeend',`<dialog id="pages-access-dialog" aria-labelledby="pages-access-title"><h2 id="pages-access-title">Tu seguimiento privado</h2><p>Activá este dispositivo con tu enlace privado. Tus notas se sincronizan con los demás dispositivos y no se publican en GitHub.</p><form id="pages-access-form"><label>Enlace privado o código de acceso<input id="pages-access-code" type="password" autocomplete="off" required></label><p id="pages-access-message" role="status"></p><button class="primary full" type="submit">Activar en este dispositivo</button></form><button id="pages-disconnect" class="subtle full" type="button">Desactivar en este dispositivo</button><button id="pages-access-close" class="text-button" type="button">Cerrar</button></dialog>`);
   function showState(state){
-    syncState=state;document.body.dataset.sync=access?'connected':'readonly';
+    syncState=state;document.body.dataset.sync=syncEnabled()?'connected':'readonly';
+    document.getElementById('pages-connect').hidden=publicEdit;
     document.getElementById('pages-connect').textContent=access?'Mi seguimiento':'Activar seguimiento';
     const label={readonly:'Catálogo de consulta',online:'Seguimiento sincronizado',offline:'Sin conexión para sincronizar. Podés conservar borradores.'}[state];
     document.getElementById('scan-state').textContent=label;
@@ -27,11 +29,11 @@
     const catalog=await data();
     if(!catalog.sync_url)throw Error('El seguimiento todavía no está configurado.');
     let response;
-    try{response=await fetch(new URL(path,catalog.sync_url),{...options,cache:'no-store',credentials:'omit',signal:AbortSignal.timeout(20000),headers:{Authorization:'Bearer '+access,'Content-Type':'application/json','ngrok-skip-browser-warning':'1'}})}
+    try{response=await fetch(new URL(path,catalog.sync_url),{...options,cache:'no-store',credentials:'omit',signal:AbortSignal.timeout(20000),headers:{...(!publicEdit&&access?{Authorization:'Bearer '+access}:{}),'Content-Type':'application/json','ngrok-skip-browser-warning':'1'}})}
     catch{showState('offline');throw Error('No se pudo conectar para guardar o consultar el seguimiento. Comprobá que la PC esté encendida y conectada.')}
     let result;try{result=await response.json()}catch{showState('offline');throw Error('La conexión de seguimiento no está disponible en este momento.')}
     if(!response.ok){
-      if(response.status===401){access='';privateCache.clear();try{localStorage.removeItem(accessKey)}catch{}showState('readonly')}
+      if(response.status===401){access='';privateCache.clear();try{localStorage.removeItem(accessKey)}catch{}showState(publicEdit?'offline':'readonly')}
       const error=new Error(typeof result.detail==='string'?result.detail:'No se pudo guardar. Revisá los datos ingresados.');error.status=response.status;throw error;
     }
     showState('online');
@@ -40,13 +42,17 @@
     return result;
   }
   const ready=(async()=>{
-    if(!access){showState('readonly');return}
+    const catalog=await data();
+    publicEdit=catalog.public_edit===true;
+    if(publicEdit){access='';try{localStorage.removeItem(accessKey)}catch{}}
+    if(!syncEnabled()){showState('readonly');return}
+    showState('offline');
     try{
       await remote('/api/listings?status=candidates&page_size=1');
-      try{localStorage.setItem(accessKey,access)}catch{}
+      if(access){try{localStorage.setItem(accessKey,access)}catch{}}
     }catch(error){document.getElementById('pages-access-message').textContent=error.message;if(access){try{localStorage.setItem(accessKey,access)}catch{}}}
   })();
-  window.deptosSyncEnabled=()=>Boolean(access);
+  window.deptosSyncEnabled=syncEnabled;
   document.getElementById('pages-connect').onclick=()=>document.getElementById('pages-access-dialog').showModal();
   document.getElementById('pages-access-close').onclick=()=>document.getElementById('pages-access-dialog').close();
   document.getElementById('pages-disconnect').onclick=()=>{access='';privateCache.clear();try{localStorage.removeItem(accessKey)}catch{}showState('readonly');document.getElementById('pages-access-dialog').close();if(typeof load==='function')load()};
@@ -58,7 +64,7 @@
     try{await remote('/api/listings?status=candidates&page_size=1');localStorage.setItem(accessKey,access);document.getElementById('pages-access-code').value='';document.getElementById('pages-access-dialog').close();load()}
     catch(error){document.getElementById('pages-access-message').textContent=error.message}
   };
-  setInterval(()=>{if(access&&!document.hidden&&!document.querySelector('dialog[open]')&&typeof load==='function')load()},30000);
+  setInterval(()=>{if(syncEnabled()&&!document.hidden&&!document.querySelector('dialog[open]')&&typeof load==='function')load()},30000);
   const normal=value=>String(value??'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
   function selected(catalog,p){
     const eligibility=p.get('status')||'candidates',q=normal(p.get('q'));
@@ -84,7 +90,7 @@
   window.deptosStaticApi=async(path,options={})=>{
     await ready;
     const url=new URL(path,'https://catalog.invalid'),catalog=await data();
-    if(access&&url.pathname.startsWith('/api/listings')){
+    if(syncEnabled()&&url.pathname.startsWith('/api/listings')){
       try{return await remote(path,options)}catch(error){
         if(!options.method||options.method==='GET'){
           if(syncState==='offline'&&privateCache.has(path))return privateCache.get(path);
